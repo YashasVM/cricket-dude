@@ -12,8 +12,6 @@ from rich.text import Text
 from rich.align import Align
 from datetime import datetime
 
-# --- PLATFORM SPECIFIC INPUT HANDLING ---
-# This ensures it doesn't crash on your Windows machine
 try:
     import tty
     import termios
@@ -138,7 +136,7 @@ class CricketDude:
 
     def generate_menu_layout(self):
         t = Table(box=None, expand=True); t.add_column(justify="center")
-        t.add_row(Panel(Text("🏏 CRICKET DUDE", style="bold yellow", justify="center"), border_style="green"))
+        t.add_row(Panel(Text("🏏 CRICKET DUDE   v1.0", style="bold yellow", justify="center"), border_style="green"))
         for i, opt in enumerate(self.menu_options):
             style = "bold reverse cyan" if i == self.selected_idx else "white"
             t.add_row(Text(f" {opt} ", style=style, justify="center"))
