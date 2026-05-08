@@ -5,7 +5,8 @@ import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Iterable
+from typing import Any, Iterable, Protocol
+from urllib.parse import urlparse
 
 import requests
 from rich import box
@@ -30,13 +31,22 @@ except ImportError:
 
 
 API_KEY_ENV = "CRICKET_API_KEY"
+SOURCE_ENV = "CRICKET_SOURCE"
 REFRESH_SECONDS_ENV = "CRICKET_REFRESH_SECONDS"
 CACHE_SECONDS_ENV = "CRICKET_CACHE_SECONDS"
+SCRAPE_URL_ENV = "CRICKET_SCRAPE_URL"
+SCRAPE_MATCH_SELECTOR_ENV = "CRICKET_SCRAPE_MATCH_SELECTOR"
+SCRAPE_TEAM_ONE_SELECTOR_ENV = "CRICKET_SCRAPE_TEAM_ONE_SELECTOR"
+SCRAPE_TEAM_TWO_SELECTOR_ENV = "CRICKET_SCRAPE_TEAM_TWO_SELECTOR"
+SCRAPE_SCORE_SELECTOR_ENV = "CRICKET_SCRAPE_SCORE_SELECTOR"
+SCRAPE_STATUS_SELECTOR_ENV = "CRICKET_SCRAPE_STATUS_SELECTOR"
 DEFAULT_REFRESH_SECONDS = 60
 DEFAULT_SCORE_CACHE_SECONDS = 60
 DEFAULT_SCHEDULE_CACHE_SECONDS = 300
+DEFAULT_SCRAPE_CACHE_SECONDS = 10
 IDLE_SLEEP_SECONDS = 0.05
 REQUEST_TIMEOUT_SECONDS = 10
+USER_AGENT = "cricket-dude/1.1 (+https://github.com/YashasVM/cricket-dude)"
 
 console = Console()
 
@@ -61,6 +71,11 @@ class CacheEntry:
     data: dict[str, Any]
 
 
+class ScoreProvider(Protocol):
+    def get_matches(self, mode: str = "live", force_refresh: bool = False) -> list[Match]:
+        ...
+
+
 class CricketDataAPI:
     """Small client for CricketData.org / CricAPI score endpoints."""
 
@@ -68,6 +83,7 @@ class CricketDataAPI:
         self.api_key = api_key
         self.base_url = "https://api.cricapi.com/v1"
         self.session = session or requests.Session()
+        _set_user_agent(self.session)
         self.score_cache_seconds = score_cache_seconds
         self._cache: dict[tuple[str, tuple[tuple[str, Any], ...]], CacheEntry] = {}
 
@@ -170,11 +186,102 @@ class CricketDataAPI:
         return (item for item in items if isinstance(item, dict))
 
 
+@dataclass(frozen=True)
+class ScrapeSelectors:
+    match: str
+    score: str
+    team_one: str = ""
+    team_two: str = ""
+    status: str = ""
+
+
+class ScrapedScoreProvider:
+    """Opt-in HTML scoreboard reader for sites the user is allowed to fetch."""
+
+    def __init__(
+        self,
+        url: str,
+        selectors: ScrapeSelectors,
+        session: requests.Session | None = None,
+        cache_seconds: int = DEFAULT_SCRAPE_CACHE_SECONDS,
+    ) -> None:
+        self.url = url
+        self.selectors = selectors
+        self.session = session or requests.Session()
+        _set_user_agent(self.session)
+        self.cache_seconds = cache_seconds
+        self._cache: tuple[float, str] | None = None
+
+    def get_matches(self, mode: str = "live", force_refresh: bool = False) -> list[Match]:
+        if mode not in {"live", "ipl"}:
+            return []
+
+        try:
+            html = self._get_html(force_refresh=force_refresh)
+            return self._parse_matches(html)
+        except (ImportError, requests.RequestException, ValueError):
+            return []
+
+    def _get_html(self, force_refresh: bool = False) -> str:
+        now = time.monotonic()
+        if self._cache and not force_refresh and now - self._cache[0] < self.cache_seconds:
+            return self._cache[1]
+
+        response = self.session.get(self.url, timeout=REQUEST_TIMEOUT_SECONDS)
+        response.raise_for_status()
+        self._cache = (now, response.text)
+        return response.text
+
+    def _parse_matches(self, html: str) -> list[Match]:
+        from bs4 import BeautifulSoup
+
+        soup = BeautifulSoup(html, "html.parser")
+        cards = soup.select(self.selectors.match)
+        matches = [self._parse_match(card) for card in cards]
+        return [match for match in matches if match.score != "N/A"]
+
+    def _parse_match(self, card: Any) -> Match:
+        team_one = self._select_text(card, self.selectors.team_one)
+        team_two = self._select_text(card, self.selectors.team_two)
+        score = self._select_text(card, self.selectors.score) or "N/A"
+        status = self._select_text(card, self.selectors.status) or "Live"
+        description = f"{team_one} vs {team_two}" if team_one and team_two else self._fallback_description()
+
+        return Match(
+            description=description,
+            score=score,
+            status=status,
+            is_live=True,
+            team_one=team_one or "T1",
+            team_two=team_two or "T2",
+            team_one_score=score,
+            match_state="live",
+            series="scraped",
+        )
+
+    def _fallback_description(self) -> str:
+        host = urlparse(self.url).netloc or "scoreboard"
+        return f"Scraped score from {host}"
+
+    @staticmethod
+    def _select_text(card: Any, selector: str) -> str:
+        if not selector:
+            return ""
+        node = card.select_one(selector)
+        return " ".join(node.get_text(" ", strip=True).split()) if node else ""
+
+
 def get_key() -> str | None:
     """Read one key press without blocking the terminal UI."""
     if IS_WINDOWS:
         return _get_windows_key()
     return _get_posix_key()
+
+
+def _set_user_agent(session: Any) -> None:
+    headers = getattr(session, "headers", None)
+    if headers is not None:
+        headers.update({"User-Agent": USER_AGENT})
 
 
 def _get_windows_key() -> str | None:
@@ -214,11 +321,10 @@ def _get_posix_key() -> str | None:
 class CricketDude:
     def __init__(
         self,
-        api_key: str,
+        provider: ScoreProvider,
         refresh_seconds: int = DEFAULT_REFRESH_SECONDS,
-        cache_seconds: int = DEFAULT_SCORE_CACHE_SECONDS,
     ) -> None:
-        self.api = CricketDataAPI(api_key, score_cache_seconds=cache_seconds)
+        self.provider = provider
         self.refresh_seconds = refresh_seconds
         self.menu_options = ["Live Matches", "Recent Results", "Upcoming Schedule", "IPL Special", "Exit"]
         self.selected_idx = 0
@@ -344,13 +450,13 @@ class CricketDude:
         return True
 
     def _show_matches(self) -> None:
-        self.current_data = self.api.get_matches(self.current_mode or "live")
+        self.current_data = self.provider.get_matches(self.current_mode or "live")
         last_update = time.monotonic()
 
         with Live(self.generate_viewer_layout(self.current_mode or "live"), screen=True) as live:
             while self.current_mode:
                 if time.monotonic() - last_update > self.refresh_seconds:
-                    self.current_data = self.api.get_matches(self.current_mode)
+                    self.current_data = self.provider.get_matches(self.current_mode)
                     last_update = time.monotonic()
 
                 live.update(self.generate_viewer_layout(self.current_mode))
@@ -358,7 +464,7 @@ class CricketDude:
                 if key is None:
                     time.sleep(IDLE_SLEEP_SECONDS)
                 elif key in {"r", "R"}:
-                    self.current_data = self.api.get_matches(self.current_mode, force_refresh=True)
+                    self.current_data = self.provider.get_matches(self.current_mode, force_refresh=True)
                     last_update = time.monotonic()
                 elif key in {"\x1b", "q", "Q"}:
                     self.current_mode = None
@@ -372,17 +478,53 @@ def _get_positive_int_env(name: str, default: int) -> int:
     return value if value > 0 else default
 
 
-def main() -> None:
+def _build_provider(cache_seconds: int) -> ScoreProvider | None:
+    source = os.environ.get(SOURCE_ENV, "api").strip().lower()
+    if source == "scrape":
+        return _build_scrape_provider()
+    if source != "api":
+        console.print(f"[bold red]Unknown {SOURCE_ENV}: {source}[/bold red]")
+        return None
+
     api_key = os.environ.get(API_KEY_ENV, "")
     if not api_key:
         console.print(f"[bold red]Missing {API_KEY_ENV}.[/bold red] Set it before running cricket-dude.")
-        return
+        return None
+    return CricketDataAPI(api_key, score_cache_seconds=cache_seconds)
 
+
+def _build_scrape_provider() -> ScoreProvider | None:
+    url = os.environ.get(SCRAPE_URL_ENV, "").strip()
+    match_selector = os.environ.get(SCRAPE_MATCH_SELECTOR_ENV, "").strip()
+    score_selector = os.environ.get(SCRAPE_SCORE_SELECTOR_ENV, "").strip()
+
+    if not url or not match_selector or not score_selector:
+        console.print(
+            "[bold red]Scrape mode needs CRICKET_SCRAPE_URL, "
+            "CRICKET_SCRAPE_MATCH_SELECTOR, and CRICKET_SCRAPE_SCORE_SELECTOR.[/bold red]"
+        )
+        return None
+
+    selectors = ScrapeSelectors(
+        match=match_selector,
+        score=score_selector,
+        team_one=os.environ.get(SCRAPE_TEAM_ONE_SELECTOR_ENV, "").strip(),
+        team_two=os.environ.get(SCRAPE_TEAM_TWO_SELECTOR_ENV, "").strip(),
+        status=os.environ.get(SCRAPE_STATUS_SELECTOR_ENV, "").strip(),
+    )
+    cache_seconds = _get_positive_int_env(CACHE_SECONDS_ENV, DEFAULT_SCRAPE_CACHE_SECONDS)
+    return ScrapedScoreProvider(url=url, selectors=selectors, cache_seconds=cache_seconds)
+
+
+def main() -> None:
     refresh_seconds = _get_positive_int_env(REFRESH_SECONDS_ENV, DEFAULT_REFRESH_SECONDS)
     cache_seconds = _get_positive_int_env(CACHE_SECONDS_ENV, DEFAULT_SCORE_CACHE_SECONDS)
+    provider = _build_provider(cache_seconds)
+    if provider is None:
+        return
 
     try:
-        CricketDude(api_key, refresh_seconds=refresh_seconds, cache_seconds=cache_seconds).start()
+        CricketDude(provider, refresh_seconds=refresh_seconds).start()
     except KeyboardInterrupt:
         pass
     finally:
