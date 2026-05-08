@@ -1,0 +1,23 @@
+Python artifacts
+
+pycache/
+*.py[cod]
+*$py.class
+
+Environments
+
+.env
+.venv
+env/
+venv/
+
+Distribution
+
+dist/
+build/
+*.egg-info/
+
+OS
+
+.DS_Store
+Thumbs.db
