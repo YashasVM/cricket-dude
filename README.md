@@ -22,7 +22,7 @@ Most sports websites are heavy, filled with ads, and slow. **Cricket Dude** solv
 ### Option 1: Standard Installation (Recommended)
 This installs the app globally on your system so you can run it from anywhere.
 ```bash
-git clone [https://github.com/mrduhlol/cricket-dude.git](https://github.com/mrduhlol/cricket-dude.git)
+git clone https://github.com/mrduhlol/cricket-dude.git
 ```
 
 
