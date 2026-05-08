@@ -8,7 +8,7 @@ README = (ROOT / "README.md").read_text(encoding="utf-8")
 
 setup(
     name="cricket-dude",
-    version="1.1.0",
+    version="1.1.1",
     description="A fast terminal UI for live cricket scores.",
     long_description=README,
     long_description_content_type="text/markdown",

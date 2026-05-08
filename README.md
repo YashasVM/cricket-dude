@@ -9,7 +9,9 @@ Cricket Dude is a lightweight terminal UI for checking live cricket scores, rece
 
 * Live, recent, upcoming, and IPL views.
 * Rich-powered terminal interface with keyboard navigation.
-* Score refreshes every 15 seconds while viewing matches.
+* Score view refreshes every 60 seconds by default while viewing matches.
+* Reuses cached API responses when switching between related views.
+* Manual refresh with `R` when you want fresh data immediately.
 * Reuses HTTP connections for lower refresh overhead.
 * Keeps API credentials out of source code.
 
@@ -35,6 +37,15 @@ Linux/macOS:
 export CRICKET_API_KEY="your-key-here"
 ```
 
+Optional API usage controls:
+
+```powershell
+$env:CRICKET_REFRESH_SECONDS="120"
+$env:CRICKET_CACHE_SECONDS="120"
+```
+
+`CRICKET_REFRESH_SECONDS` controls how often the active screen tries to refresh. `CRICKET_CACHE_SECONDS` controls how long live/recent/IPL score data is reused before another API request is allowed. Upcoming schedules are cached for 5 minutes.
+
 Run the app:
 
 ```bash
@@ -51,6 +62,7 @@ python main.py
 
 * Up / Down: move through menu options.
 * Enter / Space: open the selected view.
+* R: refresh the current view immediately.
 * Q / Esc: return to the main menu or exit.
 * Ctrl+C: quit immediately.
 

@@ -30,7 +30,11 @@ except ImportError:
 
 
 API_KEY_ENV = "CRICKET_API_KEY"
-DEFAULT_REFRESH_SECONDS = 15
+REFRESH_SECONDS_ENV = "CRICKET_REFRESH_SECONDS"
+CACHE_SECONDS_ENV = "CRICKET_CACHE_SECONDS"
+DEFAULT_REFRESH_SECONDS = 60
+DEFAULT_SCORE_CACHE_SECONDS = 60
+DEFAULT_SCHEDULE_CACHE_SECONDS = 300
 IDLE_SLEEP_SECONDS = 0.05
 REQUEST_TIMEOUT_SECONDS = 10
 
@@ -51,28 +55,43 @@ class Match:
     match_state: str = ""
 
 
+@dataclass(frozen=True)
+class CacheEntry:
+    created_at: float
+    data: dict[str, Any]
+
+
 class CricketDataAPI:
     """Small client for CricketData.org / CricAPI score endpoints."""
 
-    def __init__(self, api_key: str, session: requests.Session | None = None) -> None:
+    def __init__(self, api_key: str, session: requests.Session | None = None, score_cache_seconds: int = DEFAULT_SCORE_CACHE_SECONDS) -> None:
         self.api_key = api_key
         self.base_url = "https://api.cricapi.com/v1"
         self.session = session or requests.Session()
+        self.score_cache_seconds = score_cache_seconds
+        self._cache: dict[tuple[str, tuple[tuple[str, Any], ...]], CacheEntry] = {}
 
-    def get_matches(self, mode: str = "live") -> list[Match]:
+    def get_matches(self, mode: str = "live", force_refresh: bool = False) -> list[Match]:
         if not self.api_key:
             return []
 
         try:
             if mode in {"live", "recent", "ipl"}:
-                return self._get_score_matches(mode)
-            return self._get_upcoming_matches()
+                return self._get_score_matches(mode, force_refresh=force_refresh)
+            return self._get_upcoming_matches(force_refresh=force_refresh)
         except requests.RequestException:
             return []
         except ValueError:
             return []
 
-    def _get_json(self, path: str, **params: Any) -> dict[str, Any]:
+    def _get_json(self, path: str, cache_seconds: int, force_refresh: bool = False, **params: Any) -> dict[str, Any]:
+        cache_key = (path, tuple(sorted(params.items())))
+        now = time.monotonic()
+        cached = self._cache.get(cache_key)
+
+        if cached and not force_refresh and now - cached.created_at < cache_seconds:
+            return cached.data
+
         response = self.session.get(
             f"{self.base_url}/{path}",
             params={"apikey": self.api_key, **params},
@@ -80,10 +99,12 @@ class CricketDataAPI:
         )
         response.raise_for_status()
         data = response.json()
-        return data if isinstance(data, dict) else {}
+        payload = data if isinstance(data, dict) else {}
+        self._cache[cache_key] = CacheEntry(created_at=now, data=payload)
+        return payload
 
-    def _get_score_matches(self, mode: str) -> list[Match]:
-        data = self._get_json("cricScore")
+    def _get_score_matches(self, mode: str, force_refresh: bool = False) -> list[Match]:
+        data = self._get_json("cricScore", cache_seconds=self.score_cache_seconds, force_refresh=force_refresh)
         if data.get("status") != "success":
             return []
 
@@ -93,8 +114,13 @@ class CricketDataAPI:
             if self._matches_mode(raw_match=match, mode=mode)
         ]
 
-    def _get_upcoming_matches(self) -> list[Match]:
-        data = self._get_json("matches", offset=0)
+    def _get_upcoming_matches(self, force_refresh: bool = False) -> list[Match]:
+        data = self._get_json(
+            "matches",
+            cache_seconds=DEFAULT_SCHEDULE_CACHE_SECONDS,
+            force_refresh=force_refresh,
+            offset=0,
+        )
         if data.get("status") != "success":
             return []
 
@@ -136,7 +162,7 @@ class CricketDataAPI:
             return raw_match.match_state == "result"
         if mode == "ipl":
             series = raw_match.series.lower()
-            return "indian premier league" in series or "ipl" in raw_match.description.lower()
+            return "indian premier league" in series or "ipl" in series or "ipl" in raw_match.description.lower()
         return True
 
     @staticmethod
@@ -186,8 +212,13 @@ def _get_posix_key() -> str | None:
 
 
 class CricketDude:
-    def __init__(self, api_key: str, refresh_seconds: int = DEFAULT_REFRESH_SECONDS) -> None:
-        self.api = CricketDataAPI(api_key)
+    def __init__(
+        self,
+        api_key: str,
+        refresh_seconds: int = DEFAULT_REFRESH_SECONDS,
+        cache_seconds: int = DEFAULT_SCORE_CACHE_SECONDS,
+    ) -> None:
+        self.api = CricketDataAPI(api_key, score_cache_seconds=cache_seconds)
         self.refresh_seconds = refresh_seconds
         self.menu_options = ["Live Matches", "Recent Results", "Upcoming Schedule", "IPL Special", "Exit"]
         self.selected_idx = 0
@@ -250,7 +281,7 @@ class CricketDude:
 
         layout["header"].update(self._make_header(mode))
         layout["body"].update(self._make_match_table())
-        layout["tail"].update(Panel(Text("Press Q or Esc to return", justify="center", style="dim")))
+        layout["tail"].update(Panel(Text("Press R to refresh now | Q or Esc to return", justify="center", style="dim")))
         return layout
 
     def _make_header(self, mode: str) -> Panel:
@@ -326,8 +357,19 @@ class CricketDude:
                 key = get_key()
                 if key is None:
                     time.sleep(IDLE_SLEEP_SECONDS)
+                elif key in {"r", "R"}:
+                    self.current_data = self.api.get_matches(self.current_mode, force_refresh=True)
+                    last_update = time.monotonic()
                 elif key in {"\x1b", "q", "Q"}:
                     self.current_mode = None
+
+
+def _get_positive_int_env(name: str, default: int) -> int:
+    try:
+        value = int(os.environ.get(name, str(default)))
+    except ValueError:
+        return default
+    return value if value > 0 else default
 
 
 def main() -> None:
@@ -336,8 +378,11 @@ def main() -> None:
         console.print(f"[bold red]Missing {API_KEY_ENV}.[/bold red] Set it before running cricket-dude.")
         return
 
+    refresh_seconds = _get_positive_int_env(REFRESH_SECONDS_ENV, DEFAULT_REFRESH_SECONDS)
+    cache_seconds = _get_positive_int_env(CACHE_SECONDS_ENV, DEFAULT_SCORE_CACHE_SECONDS)
+
     try:
-        CricketDude(api_key).start()
+        CricketDude(api_key, refresh_seconds=refresh_seconds, cache_seconds=cache_seconds).start()
     except KeyboardInterrupt:
         pass
     finally:
