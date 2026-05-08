@@ -212,9 +212,29 @@ class CricbuzzLiveProvider:
     def _innings_score(innings: dict[str, Any]) -> str:
         runs = innings.get("runs", 0)
         wickets = innings.get("wickets", 0)
-        overs = innings.get("overs")
+        overs = CricbuzzLiveProvider._format_overs(innings.get("overs"))
         score = f"{runs}/{wickets}"
         return f"{score} ({overs} ov)" if overs is not None else score
+
+    @staticmethod
+    def _format_overs(raw_overs: Any) -> str | None:
+        if raw_overs is None:
+            return None
+
+        overs_text = str(raw_overs)
+        if "." not in overs_text:
+            return overs_text
+
+        overs_part, balls_part = overs_text.split(".", 1)
+        if not overs_part.isdigit() or not balls_part.isdigit():
+            return overs_text
+
+        overs = int(overs_part)
+        balls = int(balls_part[:1] or "0")
+        if balls >= 6:
+            overs += balls // 6
+            balls %= 6
+        return f"{overs}.{balls}"
 
     @staticmethod
     def _is_live_state(state: str) -> bool:
@@ -291,6 +311,7 @@ class CricketDude:
         self.selected_idx = 0
         self.current_mode: str | None = None
         self.current_data: list[Match] = []
+        self.last_score_refresh: datetime | None = None
 
     def make_scoreboard(self, match: Match) -> Panel:
         header = Text.assemble(
@@ -357,9 +378,10 @@ class CricketDude:
         grid = Table.grid(expand=True)
         grid.add_column(ratio=1)
         grid.add_column(justify="right")
+        last_refresh = self.last_score_refresh.strftime("%H:%M:%S") if self.last_score_refresh else "waiting"
         grid.add_row(
             Text(f"Mode: {mode.upper()}", style="bold green"),
-            Text(datetime.now().strftime("%H:%M:%S"), style="dim"),
+            Text(f"Score refresh: {last_refresh}", style="dim"),
         )
         return Panel(grid, border_style="blue")
 
@@ -455,6 +477,7 @@ class CricketDude:
 
     def _show_matches(self) -> None:
         self.current_data = self.provider.get_matches(self.current_mode or "live", force_refresh=True)
+        self.last_score_refresh = datetime.now()
         last_update = time.monotonic()
         last_render_second = -1
 
@@ -463,6 +486,7 @@ class CricketDude:
                 should_render = False
                 if time.monotonic() - last_update > self.refresh_seconds:
                     self.current_data = self.provider.get_matches(self.current_mode, force_refresh=True)
+                    self.last_score_refresh = datetime.now()
                     last_update = time.monotonic()
                     should_render = True
 
@@ -479,6 +503,7 @@ class CricketDude:
                     time.sleep(IDLE_SLEEP_SECONDS)
                 elif key in {"r", "R"}:
                     self.current_data = self.provider.get_matches(self.current_mode, force_refresh=True)
+                    self.last_score_refresh = datetime.now()
                     last_update = time.monotonic()
                     live.update(self.generate_viewer_layout(self.current_mode))
                 elif key in {"\x1b", "q", "Q"}:
