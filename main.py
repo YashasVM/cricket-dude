@@ -378,10 +378,14 @@ class CricketDude:
         grid = Table.grid(expand=True)
         grid.add_column(ratio=1)
         grid.add_column(justify="right")
-        last_refresh = self.last_score_refresh.strftime("%H:%M:%S") if self.last_score_refresh else "waiting"
+        if self.last_score_refresh is None:
+            refresh_label = "waiting"
+        else:
+            seconds_ago = max(0, int((datetime.now() - self.last_score_refresh).total_seconds()))
+            refresh_label = "just now" if seconds_ago == 0 else f"{seconds_ago}s ago"
         grid.add_row(
             Text(f"Mode: {mode.upper()}", style="bold green"),
-            Text(f"Score refresh: {last_refresh}", style="dim"),
+            Text(f"Updated {refresh_label}", style="dim"),
         )
         return Panel(grid, border_style="blue")
 
